@@ -1,0 +1,23 @@
+{
+  "next_button": {
+    "x": 2371,
+    "y": 1532
+  },
+  "play_button": {
+    "x": 1447,
+    "y": 840
+  },
+  "detection_area": {
+    "x1": 1426,
+    "y1": 820,
+    "x2": 1495,
+    "y2": 863
+  },
+  "reference_image": "stopped_reference.png",
+  "recording_mode": "nvidia",
+  "nvidia_toggle_hotkey": [
+    "alt",
+    "f9"
+  ],
+  "audio_device": "audio=阵列麦克风 (AMD Audio Device)"
+}
