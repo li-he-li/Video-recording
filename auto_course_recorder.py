@@ -53,6 +53,9 @@ class CourseRecorder:
         self.is_recording = False
         self.playing_state = 1  # 1 = playing, 0 = waiting to start
         self.current_output_file = None
+        self.useless_skip_enabled = False
+        self.useless_skip_runtime_config = None
+        self.useless_skip_templates = []
 
     @staticmethod
     def _wait_for_yes(prompt):
@@ -62,6 +65,54 @@ class CourseRecorder:
             if answer == "y":
                 return True
             print("Please input 'y' to confirm.")
+
+    @staticmethod
+    def _ask_yes_no(prompt, default=None):
+        """Prompt y/n and return bool."""
+        normalized_default = None
+        if isinstance(default, str) and default.lower() in {"y", "n"}:
+            normalized_default = default.lower()
+
+        while True:
+            print(prompt, end="", flush=True)
+            answer = input().strip().lower()
+            if not answer and normalized_default:
+                answer = normalized_default
+            if answer in {"y", "n"}:
+                return answer == "y"
+            print("Please input 'y' or 'n'.")
+
+    @staticmethod
+    def _input_positive_int(prompt, default):
+        while True:
+            print(prompt, end="", flush=True)
+            answer = input().strip()
+            if not answer:
+                return default
+            if answer.isdigit() and int(answer) > 0:
+                return int(answer)
+            print("Please input a positive integer.")
+
+    @staticmethod
+    def _input_float_in_range(prompt, default, min_value, max_value):
+        while True:
+            print(prompt, end="", flush=True)
+            answer = input().strip()
+            if not answer:
+                return default
+            try:
+                value = float(answer)
+            except ValueError:
+                print("Please input a valid number.")
+                continue
+            if min_value <= value <= max_value:
+                return value
+            print(f"Please input a number in [{min_value}, {max_value}].")
+
+    @staticmethod
+    def _is_image_file(path):
+        ext = os.path.splitext(path)[1].lower()
+        return ext in {".png", ".jpg", ".jpeg", ".bmp", ".webp"}
 
     @staticmethod
     def _normalize_audio_device(audio_device):
@@ -277,6 +328,8 @@ class CourseRecorder:
             config["nvidia_toggle_hotkey"] = ["alt", "f9"]
         # Prefer system loopback devices (Stereo Mix/CABLE) to avoid muffled mic capture.
         config["audio_device"] = previous_config.get("audio_device") or self._resolve_audio_device() or DEFAULT_AUDIO_DEVICE
+        if isinstance(previous_config.get("useless_page_skip"), dict):
+            config["useless_page_skip"] = previous_config["useless_page_skip"]
 
         print("\nSetup completed.")
         print(f"Next button: {config['next_button']}")
@@ -288,6 +341,175 @@ class CourseRecorder:
         Config.save(config)
         self.config = config
         return True
+
+    def setup_useless_page_skip_config(self):
+        """Interactive setup for useless-page skip feature."""
+        if self.config is None:
+            self.config = {}
+
+        previous = self.config.get("useless_page_skip", {})
+        default_templates_dir = str(previous.get("templates_dir", "image")).strip() or "image"
+        default_area_count = len(previous.get("areas", [])) or 1
+        default_similarity = float(previous.get("similarity_threshold", 0.86))
+        default_skip_next = previous.get("next_button")
+
+        print("\n" + "=" * 60)
+        print("Useless Page Skip - Setup")
+        print("=" * 60)
+        print("If any detection area looks similar to templates in folder 'image',")
+        print("the script will click Next automatically.")
+
+        print(f"\nTemplate folder path (default: {default_templates_dir}): ", end="", flush=True)
+        templates_dir_input = input().strip()
+        templates_dir = templates_dir_input or default_templates_dir
+        if not os.path.isdir(templates_dir):
+            os.makedirs(templates_dir, exist_ok=True)
+            print(f"Created template folder: {templates_dir}")
+
+        area_count = self._input_positive_int(
+            f"How many detection areas? (default: {default_area_count}): ",
+            default_area_count,
+        )
+        similarity_threshold = self._input_float_in_range(
+            f"Similarity threshold [0.0-1.0] (default: {default_similarity:.2f}): ",
+            default_similarity,
+            0.0,
+            1.0,
+        )
+
+        print("\nSet dedicated Next button position for useless-page skip.")
+        if isinstance(default_skip_next, dict):
+            print(
+                f"Current useless-skip Next button: "
+                f"({default_skip_next.get('x')}, {default_skip_next.get('y')})"
+            )
+        print("Move mouse to this button and type 'y'.")
+        self._wait_for_yes("Input 'y' to capture useless-skip next-button position: ")
+        skip_next_x, skip_next_y = pyautogui.position()
+        print(f"Captured useless-skip Next button: ({skip_next_x}, {skip_next_y})")
+
+        areas = []
+        print("\nCapture each detection area by moving mouse and pressing 'y'.")
+        for idx in range(area_count):
+            print(f"\n[Area {idx + 1}/{area_count}] Move mouse to TOP-LEFT corner.")
+            self._wait_for_yes("Input 'y' to capture top-left: ")
+            x1, y1 = pyautogui.position()
+            print(f"Top-left: ({x1}, {y1})")
+
+            print("Move mouse to BOTTOM-RIGHT corner.")
+            self._wait_for_yes("Input 'y' to capture bottom-right: ")
+            x2, y2 = pyautogui.position()
+            print(f"Bottom-right: ({x2}, {y2})")
+
+            areas.append(
+                {
+                    "x1": min(x1, x2),
+                    "y1": min(y1, y2),
+                    "x2": max(x1, x2),
+                    "y2": max(y1, y2),
+                }
+            )
+            area = areas[-1]
+            width = area["x2"] - area["x1"]
+            height = area["y2"] - area["y1"]
+            if width > 0 and height > 0:
+                screenshot = pyautogui.screenshot(region=(area["x1"], area["y1"], width, height))
+                image = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+                stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                sample_name = f"area_{idx + 1}_capture_{stamp}.png"
+                sample_path = os.path.join(templates_dir, sample_name)
+                cv2.imwrite(sample_path, image)
+                print(f"Saved area screenshot: {sample_path}")
+
+        skip_config = {
+            "enabled": True,
+            "templates_dir": templates_dir,
+            "areas": areas,
+            "next_button": {"x": skip_next_x, "y": skip_next_y},
+            "similarity_threshold": float(similarity_threshold),
+            "check_interval_seconds": 13,
+        }
+        self.config["useless_page_skip"] = skip_config
+        Config.save(self.config)
+
+        print("\nUseless-page skip setup completed.")
+        print(f"Template folder: {templates_dir}")
+        print(f"Areas: {len(areas)}")
+        print(f"Useless-skip Next button: ({skip_next_x}, {skip_next_y})")
+        print(f"Similarity threshold: {skip_config['similarity_threshold']:.2f}")
+        print("Check interval: 13s")
+        return True
+
+    def _load_useless_skip_templates(self, templates_dir):
+        templates = []
+        if not templates_dir or not os.path.isdir(templates_dir):
+            return templates
+
+        for name in sorted(os.listdir(templates_dir)):
+            path = os.path.join(templates_dir, name)
+            if not os.path.isfile(path) or not self._is_image_file(path):
+                continue
+            image = cv2.imread(path)
+            if image is None:
+                continue
+            templates.append({"name": name, "path": path, "image": image})
+        return templates
+
+    def _get_useless_skip_check_interval(self):
+        return 13
+
+    def _prepare_useless_page_skip(self):
+        """Ask if useless-page skip is enabled for this run and prepare runtime state."""
+        self.useless_skip_enabled = False
+        self.useless_skip_runtime_config = None
+        self.useless_skip_templates = []
+
+        existing = (self.config or {}).get("useless_page_skip", {})
+        default_choice = "y" if bool(existing.get("enabled")) else "n"
+        enable = self._ask_yes_no(
+            f"Enable useless-page skip this run? (y/n, default {default_choice}): ",
+            default=default_choice,
+        )
+        if not enable:
+            print("Useless-page skip: OFF")
+            return
+
+        needs_setup = (
+            not existing.get("areas")
+            or not existing.get("templates_dir")
+            or not isinstance(existing.get("next_button"), dict)
+        )
+        if needs_setup:
+            print("No valid useless-page skip config found. Setup is required.")
+            if not self.setup_useless_page_skip_config():
+                print("Useless-page skip: OFF")
+                return
+            existing = (self.config or {}).get("useless_page_skip", {})
+        elif self._ask_yes_no("Reconfigure useless-page skip now? (y/n, default n): ", default="n"):
+            if not self.setup_useless_page_skip_config():
+                print("Useless-page skip: OFF")
+                return
+            existing = (self.config or {}).get("useless_page_skip", {})
+
+        templates_dir = str(existing.get("templates_dir", "image")).strip() or "image"
+        templates = self._load_useless_skip_templates(templates_dir)
+        if not templates:
+            print(f"No template images found in '{templates_dir}'. Useless-page skip is disabled.")
+            return
+
+        existing["enabled"] = True
+        self.config["useless_page_skip"] = existing
+        Config.save(self.config)
+
+        self.useless_skip_runtime_config = existing
+        self.useless_skip_templates = templates
+        self.useless_skip_enabled = True
+        skip_next = existing.get("next_button", {})
+        print(
+            f"Useless-page skip: ON ({len(existing.get('areas', []))} areas, "
+            f"{len(templates)} templates, every {self._get_useless_skip_check_interval()}s, "
+            f"next=({skip_next.get('x')}, {skip_next.get('y')}))"
+        )
 
     @staticmethod
     def _extract_white_triangle_mask(image, white_value_threshold=245, max_saturation=45):
@@ -364,6 +586,59 @@ class CourseRecorder:
         iou = float(intersection) / float(union)
         ratio_delta = abs(current_white_ratio - reference_white_ratio)
         return iou >= float(iou_threshold) and ratio_delta <= float(white_ratio_tolerance)
+
+    @staticmethod
+    def _compute_template_similarity(current, template):
+        """Return similarity score in [0, 1] using grayscale + edges."""
+        if current.shape[:2] != template.shape[:2]:
+            current = cv2.resize(current, (template.shape[1], template.shape[0]))
+
+        current_gray = cv2.cvtColor(current, cv2.COLOR_BGR2GRAY)
+        template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+        current_gray = cv2.GaussianBlur(current_gray, (3, 3), 0)
+        template_gray = cv2.GaussianBlur(template_gray, (3, 3), 0)
+
+        gray_score = float(cv2.matchTemplate(current_gray, template_gray, cv2.TM_CCOEFF_NORMED)[0][0])
+        if np.isnan(gray_score):
+            gray_score = 0.0
+
+        current_edges = cv2.Canny(current_gray, 80, 160)
+        template_edges = cv2.Canny(template_gray, 80, 160)
+        edge_score = float(cv2.matchTemplate(current_edges, template_edges, cv2.TM_CCOEFF_NORMED)[0][0])
+        if np.isnan(edge_score):
+            edge_score = gray_score
+
+        # Pixel-level fallback to stabilize low-texture scenes.
+        pixel_diff = cv2.absdiff(current_gray, template_gray)
+        pixel_score = 1.0 - float(np.mean(pixel_diff)) / 255.0
+
+        combined = 0.25 * pixel_score + 0.35 * gray_score + 0.40 * edge_score
+        return max(0.0, min(1.0, combined))
+
+    def check_useless_page(self):
+        """Return True if any configured area is similar to any template in templates folder."""
+        if not self.useless_skip_enabled or not self.useless_skip_runtime_config:
+            return False
+
+        areas = self.useless_skip_runtime_config.get("areas", [])
+        if not areas or not self.useless_skip_templates:
+            return False
+
+        threshold = float(self.useless_skip_runtime_config.get("similarity_threshold", 0.86))
+        for idx, area in enumerate(areas, start=1):
+            screenshot = pyautogui.screenshot(
+                region=(area["x1"], area["y1"], area["x2"] - area["x1"], area["y2"] - area["y1"])
+            )
+            current = cv2.cvtColor(np.array(screenshot), cv2.COLOR_RGB2BGR)
+
+            for template in self.useless_skip_templates:
+                score = self._compute_template_similarity(current, template["image"])
+                if score >= threshold:
+                    print(
+                        f"Detected useless page (area {idx}, template {template['name']}, score={score:.3f})"
+                    )
+                    return True
+        return False
 
     def _start_ffmpeg_recording(self, output_file):
         """Start ffmpeg recording."""
@@ -527,17 +802,27 @@ class CourseRecorder:
             (margin, margin),
         ]
 
-        area = (self.config or {}).get("detection_area")
-        if not area:
+        all_areas = []
+        main_area = (self.config or {}).get("detection_area")
+        if isinstance(main_area, dict):
+            all_areas.append(main_area)
+        skip_cfg = (self.config or {}).get("useless_page_skip", {})
+        for area in skip_cfg.get("areas", []):
+            if isinstance(area, dict):
+                all_areas.append(area)
+        if not all_areas:
             return candidates[0]
 
         padding = 20
 
         def in_detection_area(x, y):
-            return (
-                area["x1"] - padding <= x <= area["x2"] + padding
-                and area["y1"] - padding <= y <= area["y2"] + padding
-            )
+            for area in all_areas:
+                if (
+                    area["x1"] - padding <= x <= area["x2"] + padding
+                    and area["y1"] - padding <= y <= area["y2"] + padding
+                ):
+                    return True
+            return False
 
         for candidate in candidates:
             if not in_detection_area(*candidate):
@@ -559,6 +844,17 @@ class CourseRecorder:
         button = self.config["next_button"]
         pyautogui.click(button["x"], button["y"])
         print(f"Clicked Next at ({button['x']}, {button['y']})")
+        self._move_mouse_to_safe_area()
+        time.sleep(2)
+        return True
+
+    def click_useless_skip_next_button(self):
+        cfg = self.useless_skip_runtime_config or {}
+        button = cfg.get("next_button")
+        if not isinstance(button, dict) or "x" not in button or "y" not in button:
+            return False
+        pyautogui.click(button["x"], button["y"])
+        print(f"Clicked Useless-Skip Next at ({button['x']}, {button['y']})")
         self._move_mouse_to_safe_area()
         time.sleep(2)
         return True
@@ -598,6 +894,7 @@ class CourseRecorder:
         output_dir = "recordings"
         max_recording_duration = 60 * 60
         check_interval = 5
+        useless_check_interval = self._get_useless_skip_check_interval()
 
         print("\n" + "=" * 60)
         print("Auto recording started. Press Ctrl+C to stop.")
@@ -622,6 +919,7 @@ class CourseRecorder:
 
                 start_time = time.time()
                 checks = 0
+                last_useless_check_at = start_time
 
                 while True:
                     time.sleep(check_interval)
@@ -639,6 +937,23 @@ class CourseRecorder:
                         else:
                             print("NVIDIA mode: timeout clip remains in NVIDIA output folder.")
                         return
+
+                    now = time.time()
+                    if self.useless_skip_enabled and now - last_useless_check_at >= useless_check_interval:
+                        last_useless_check_at = now
+                        if self.check_useless_page():
+                            print("Detected useless page. Skip to next lesson.")
+                            if not self.click_useless_skip_next_button():
+                                print("Cannot click useless-skip Next. Stop.")
+                                return
+                            self.playing_state = 0
+                            print("State machine reset: playing_state=0")
+                            if not self.click_play_button():
+                                print("Cannot click Play after useless-page skip. Stop.")
+                                return
+                            self.playing_state = 1
+                            print("State machine update: playing_state=1")
+                            continue
 
                     if self.check_course_finished():
                         time.sleep(2)
@@ -694,6 +1009,7 @@ class CourseRecorder:
         if answer.isdigit():
             self.current_file_number = int(answer)
 
+        self._prepare_useless_page_skip()
         self.monitor_and_record()
 
 

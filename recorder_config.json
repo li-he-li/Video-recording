@@ -19,5 +19,35 @@
     "alt",
     "f9"
   ],
-  "audio_device": "audio=阵列麦克风 (AMD Audio Device)"
+  "audio_device": "audio=阵列麦克风 (AMD Audio Device)",
+  "useless_page_skip": {
+    "enabled": true,
+    "templates_dir": "image",
+    "areas": [
+      {
+        "x1": 1730,
+        "y1": 828,
+        "x2": 1827,
+        "y2": 853
+      },
+      {
+        "x1": 1944,
+        "y1": 302,
+        "x2": 2034,
+        "y2": 333
+      },
+      {
+        "x1": 535,
+        "y1": 146,
+        "x2": 640,
+        "y2": 181
+      }
+    ],
+    "next_button": {
+      "x": 2036,
+      "y": 1537
+    },
+    "similarity_threshold": 0.8,
+    "check_interval_seconds": 13
+  }
 }
